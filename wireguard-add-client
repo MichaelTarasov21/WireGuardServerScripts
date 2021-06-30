@@ -1,0 +1,87 @@
+#!/bin/bash
+if [ ! -z $1 ]; then
+  if [ $1 != 'manual' ]; then
+    echo $1 is not a valid argument
+    exit 1
+  fi
+fi
+
+#Constants
+serverconf=/etc/wireguard/wg0.conf
+subnet=10.14.0.
+host=
+port=51820
+
+echo Client Name:
+read name
+#Check if name is in use
+while [ $(grep -c \#$name $serverconf) != 0 ]
+do
+  echo Name Already In Use
+  echo Client Name:
+  read name
+done
+
+if [ ! -z $1 ]; then
+#If using manual mode a public key is provided by the user
+  echo Public Key:
+  read pubkey
+else
+  (umask 0077; wg genkey | tee /etc/wireguard/peer_A.key | wg pubkey > /etc/wireguard/peer_A.pub)
+  clientprivkey=$(cat /etc/wireguard/peer_A.key)
+  clientpubkey=$(cat /etc/wireguard/peer_A.pub)
+  rm /etc/wireguard/peer_A.pub
+  rm /etc/wireguard/peer_A.key
+fi
+
+#Get server publickey
+(umask 0077; grep PrivateKey /etc/wireguard/wg0.conf | cut -b 14- >> /etc/wireguard/serverpriv.key)
+serverpubkey=$(wg pubkey < /etc/wireguard/serverpriv.key)
+rm /etc/wireguard/serverpriv.key
+
+#Identify available IP
+vpnip=2
+ipfound=false
+while [ $ipfound == false ]
+do
+  if [ $(grep -c $subnet$vpnip $serverconf) == 0 ]; then
+    ipfound=true
+  else
+    ((vpnip++))
+  fi
+done
+
+PresharedKey=$(wg genpsk)
+
+#Add client to server config
+echo                                                                                                    >> $serverconf
+echo \#$name                                                                                            >> $serverconf
+echo [Peer]                                                                                             >> $serverconf
+echo PublicKey = $clientpubkey                                                                          >> $serverconf
+echo PresharedKey = $PresharedKey                                                                       >> $serverconf
+echo AllowedIPs = $subnet$vpnip/32                                                                      >> $serverconf
+
+#Create Client Config if not in manual mode
+if [ -z $1 ]; then
+  clientconf=/etc/wireguard/clients/$name.conf
+  (umask 0077; touch $clientconf)
+  echo [Interface]                                                                                      >> $clientconf
+  echo PrivateKey = $clientprivkey                                                                      >> $clientconf
+  echo Address = $subnet$vpnip/32                                                                       >> $clientconf
+  echo DNS = 192.168.1.2                                                                                >> $clientconf
+  echo                                                                                                  >> $clientconf
+  echo [Peer]                                                                                           >> $clientconf
+  echo PublicKey = $serverpubkey                                                                        >> $clientconf
+  echo PresharedKey = $PresharedKey                                                                     >> $clientconf
+  echo AllowedIPs = 0.0.0.0/0, ::/0                                                                     >> $clientconf
+  echo Endpoint = $host:$port                                                                           >> $clientconf
+  (umask 0077; qrencode -r $clientconf -o /etc/wireguard/clients/$name.png) || echo qrencode not found not encoding to qrcode
+else
+#Display information for manual mode
+  echo Server Public Key:
+  echo $serverpubkey
+  echo PresharedKey:
+  echo $PresharedKey
+fi
+
+systemctl restart wg-quick@wg0
